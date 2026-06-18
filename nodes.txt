@@ -1,0 +1,310 @@
+import os
+import re
+import json
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import pandas as pd
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    Docx2txtLoader,
+    CSVLoader,
+    UnstructuredExcelLoader,
+    UnstructuredPowerPointLoader,
+    UnstructuredHTMLLoader,
+    UnstructuredMarkdownLoader,
+    JSONLoader,
+)
+from langchain_community.vectorstores import Chroma
+from state import WorkflowState
+from logger import log
+
+
+load_dotenv()
+
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.6)
+validation_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+embeddings = HuggingFaceEmbeddings(model="sentence-transformers/all-MiniLM-L6-v2")
+
+RELEVANCE_THRESHOLD = 0.4   
+CHROMA_PERSIST_DIR  = "./chroma_store"
+
+SCORE_PROMPT = """
+You are a strict quality evaluator. Score the response on each metric from 0 to 10.
+Return ONLY a JSON object with this exact shape:
+{{
+  "relevance": <0-10>,
+  "accuracy":  <0-10>,
+  "clarity":   <0-10>,
+  "depth":     <0-10>,
+  "feedback":  "<one sentence on the biggest weakness>"
+}}
+
+Topic: {topic}
+Response: {response}
+"""
+
+#Detect command node
+def detect_command(state: WorkflowState) -> dict:
+    topic = state["topic"].strip()
+
+    # format: /file-review <path> | <question>
+    if topic.startswith("/file-review"):
+        remainder = topic.replace("/file-review", "", 1).strip()
+
+        if "|" in remainder:
+            file_path, file_question = remainder.split("|", 1)
+            file_path     = file_path.strip()
+            file_question = file_question.strip()
+        else:
+            # no question given — fall back to general review
+            file_path     = remainder.strip()
+            file_question = "Summarize the document and highlight the key points"
+
+        log("DETECT COMMAND", "File review command detected", {
+            "file_path":     file_path,
+            "file_question": file_question,
+            "route":         "retrieve → generate → validate",
+        })
+
+        return {
+            "command":      "file-review",
+            "file_path":    file_path,
+            "file_question": file_question,
+        }
+
+    log("DETECT COMMAND", "Normal prompt detected", {
+        "topic": topic,
+        "route": "generate → validate",
+    })
+
+    return {
+        "command":       "normal",
+        "file_path":     "",
+        "file_question": "",
+    }
+
+#Retriever node
+def load_file(file_path: str):
+    ext = os.path.splitext(file_path)[1].lower()
+
+    log("LOAD FILE", "Detecting file type", {
+        "extension": ext,
+        "file": os.path.basename(file_path),
+    })
+
+    # PDF
+    if ext == ".pdf":
+        return PyPDFLoader(file_path).load()
+
+    # Word documents
+    elif ext == ".docx":
+        return Docx2txtLoader(file_path).load()
+
+    # Excel
+    elif ext in [".xlsx", ".xls"]:
+        return UnstructuredExcelLoader(file_path).load()
+
+    # CSV — convert to readable text so chunks make sense
+    elif ext == ".csv":
+        df = pd.read_csv(file_path)
+        text = df.to_string(index=False)
+        from langchain_core.documents import Document
+        return [Document(page_content=text, metadata={"source": file_path})]
+
+    # PowerPoint
+    elif ext in [".pptx", ".ppt"]:
+        return UnstructuredPowerPointLoader(file_path).load()
+
+    # HTML
+    elif ext in [".html", ".htm"]:
+        return UnstructuredHTMLLoader(file_path).load()
+
+    # Markdown
+    elif ext == ".md":
+        return UnstructuredMarkdownLoader(file_path).load()
+
+    # JSON — extract all text values from the structure
+    elif ext == ".json":
+        return JSONLoader(
+            file_path=file_path,
+            jq_schema=".. | strings",
+            text_content=False,
+        ).load()
+
+    # Python, JS, TS, Java, C, C++, any code file
+    elif ext in [".py", ".js", ".ts", ".java", ".c", ".cpp", ".cs", ".go", ".rs", ".rb"]:
+        return TextLoader(file_path, encoding="utf-8").load()
+
+    # Plain text and everything else
+    else:
+        try:
+            return TextLoader(file_path, encoding="utf-8").load()
+        except Exception:
+            # last resort — read raw bytes as text
+            with open(file_path, "r", errors="ignore") as f:
+                content = f.read()
+            from langchain_core.documents import Document
+            return [Document(page_content=content, metadata={"source": file_path})]
+
+def retrieve(state: WorkflowState) -> dict:
+    file_path = state['file_path']
+    file_question = state['file_question']
+
+    collection_name = "file_" + os.path.basename(file_path).replace(".", "_").replace(" ", "_")
+
+    log("RETRIEVE", "Checking ChromaDB for existing embeddings", {
+        "collection": collection_name,
+        "file_path":  file_path,
+    })
+
+    already_embedded = state.get("file_already_embedded", False)
+    if already_embedded:
+        log("RETRIEVE", "Reusing existing embeddings — skipping re-embed", {})
+        vectorstore = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=CHROMA_PERSIST_DIR,
+        )
+    else:
+        log("RETRIEVE", "Embedding file for the first time", {
+            "file_path": file_path,
+        })
+
+        documents = load_file(file_path)
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+        )
+        chunks = splitter.split_documents(documents)
+
+        log("RETRIEVE", "File chunked", {
+            "total_chunks": len(chunks),
+        })
+
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            collection_name=collection_name,
+            persist_directory=CHROMA_PERSIST_DIR,
+        )
+    
+    results_with_scores = vectorstore.similarity_search_with_relevance_scores(
+        file_question, k=6
+    )
+
+    log("RETRIEVE", "Raw chunks retrieved", {
+        "total": len(results_with_scores),
+        "scores": [round(score, 3) for _, score in results_with_scores],
+    })
+
+    # filter by relevance threshold
+    filtered = [
+        (doc, score)
+        for doc, score in results_with_scores
+        if score >= RELEVANCE_THRESHOLD
+    ]
+    if not filtered:
+        log("RETRIEVE WARN", "No chunks passed threshold — using top 3 regardless", {
+            "threshold": RELEVANCE_THRESHOLD,
+        })
+        filtered = results_with_scores[:3]
+
+    retrieved_chunks  = "\n\n".join([doc.page_content for doc, _ in filtered])
+    retrieval_scores  = [round(score, 3) for _, score in filtered]
+
+    log("RETRIEVE DONE", "Final chunks after relevance filter", {
+        "chunks_kept":      len(filtered),
+        "relevance_scores": retrieval_scores,
+        "preview":          retrieved_chunks[:200] + "...",
+    })
+
+    return {
+        "retrieved_chunks":      retrieved_chunks,
+        "retrieval_scores":      retrieval_scores,
+        "file_already_embedded": True,
+    }
+
+#Generate node
+def generate(state: WorkflowState) -> dict:
+    log("GENERATE", f"Starting attempt #{state.get('attempts', 0) + 1}", {
+        "topic":            state["topic"],
+        "has_feedback":     bool(state.get("feedback")),
+        "feedback":         state.get("feedback", "none"),
+        "has_rag_context":  bool(state.get("retrieved_chunks")),
+    })
+
+    messages = [
+        SystemMessage(content="You are a helpful, accurate, and clear assistant."),
+    ]
+
+    if state.get("feedback"):
+        messages.append(SystemMessage(
+            content=f"Previous attempt scored {state['avg_score']:.1f}/10. "
+                    f"Improve by addressing: {state['feedback']}"
+        ))
+
+    if state.get("retrieved_chunks"):
+        messages.append(SystemMessage(
+            content=f"Use the following extracted content from the file to answer the user's question. "
+                    f"Only use information present in the content below:\n\n"
+                    f"{state['retrieved_chunks']}"
+        ))
+        messages.append(HumanMessage(content=state["file_question"]))
+    else:
+        messages.append(HumanMessage(content=state["topic"]))
+
+    response = llm.invoke(messages)
+
+    log("GENERATE DONE", "LLM responded", {
+        "response_preview": response.content[:120] + "...",
+    })
+
+    return {
+        "response": response.content,
+        "attempts": state.get("attempts", 0) + 1,
+        "history":  messages + [response],
+    }
+
+#Validator node
+def validate(state: WorkflowState) -> dict:
+    log("VALIDATE", f"Scoring attempt #{state.get('attempts')}", {
+        "response_preview": state["response"][:120] + "...",
+    })
+
+    prompt = SCORE_PROMPT.format(
+        topic=state["topic"],
+        response=state["response"],
+    )
+    result = validation_llm.invoke([HumanMessage(content=prompt)])
+
+    raw = result.content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
+    try:
+        scores = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"Bad output: {raw}")
+        raise
+
+    feedback = scores.pop("feedback")
+    avg = sum(scores.values()) / len(scores)
+
+    log("VALIDATE DONE", "Scores received", {
+        "relevance": scores.get("relevance"),
+        "accuracy":  scores.get("accuracy"),
+        "clarity":   scores.get("clarity"),
+        "depth":     scores.get("depth"),
+        "avg_score": round(avg, 2),
+        "feedback":  feedback,
+    })
+
+    return {
+        "scores":    scores,
+        "avg_score": round(avg, 2),
+        "feedback":  feedback,
+    }

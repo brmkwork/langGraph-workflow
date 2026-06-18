@@ -1,0 +1,12 @@
+langgraph
+langchain-groq
+langchain-core
+chromadb 
+sentence-transformers 
+langchain-community 
+pypdf
+unstructured 
+python-pptx 
+openpyxl 
+pandas 
+jsonloader
