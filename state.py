@@ -9,9 +9,13 @@ class WorkflowState(TypedDict):
     attempts: int
     feedback: str
     history: Annotated[list, add_messages]
+
     command: str
     file_path: str
     file_question: str        
     retrieved_chunks: str
     retrieval_scores: list   
     file_already_embedded: bool
+
+    pii_found: list
+    pii_redaction_count: int

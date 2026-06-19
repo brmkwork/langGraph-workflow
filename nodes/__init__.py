@@ -2,3 +2,8 @@ from nodes.detect_command import detect_command
 from nodes.retrieve import retrieve
 from nodes.generate import generate
 from nodes.validate import validate
+from nodes.detect_command import detect_command
+from nodes.retrieve import retrieve
+from nodes.redact_pii import redact_pii
+from nodes.generate import generate
+from nodes.validate import validate

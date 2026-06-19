@@ -3,7 +3,7 @@ from state import WorkflowState
 from nodes import detect_command, retrieve, generate, validate
 from edges import should_continue
 from logger import log
-from nodes import detect_command, retrieve, generate, validate
+from nodes import detect_command, retrieve, generate, validate, redact_pii
 
 #Conditional edge: after detect_command 
 def route_command(state: WorkflowState) -> str:
@@ -27,9 +27,10 @@ def build_graph():
 
     #Register all nodes 
     builder.add_node("detect_command", detect_command)
-    builder.add_node("retrieve",       retrieve)
-    builder.add_node("generate",       generate)
-    builder.add_node("validate",       validate)
+    builder.add_node("retrieve", retrieve)
+    builder.add_node("redact_pii", redact_pii)
+    builder.add_node("generate", generate)
+    builder.add_node("validate", validate)
 
     #Entry point 
     builder.set_entry_point("detect_command")
@@ -45,7 +46,8 @@ def build_graph():
     )
 
     #retrieve always goes to generate 
-    builder.add_edge("retrieve", "generate")
+    builder.add_edge("retrieve", "redact_pii")
+    builder.add_edge("redact_pii", "generate")
 
     #generate always goes to validate 
     builder.add_edge("generate", "validate")

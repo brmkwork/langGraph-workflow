@@ -10,3 +10,6 @@ python-pptx
 openpyxl 
 pandas 
 jsonloader
+spacy 
+presidio-analyzer 
+presidio-anonymizer

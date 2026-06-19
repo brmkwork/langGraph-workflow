@@ -59,6 +59,8 @@ result = graph.invoke({
     "retrieved_chunks":      "",
     "retrieval_scores":      [],
     "file_already_embedded": False,
+    "pii_found":             [],
+    "pii_redaction_count":   0,
 })
 
 print("\n" + "─" * 30)
@@ -71,3 +73,6 @@ print(f"\n  Metrics : {result['scores']}")
 
 if result.get("retrieval_scores"):
     print(f"  Chunk relevance scores : {result['retrieval_scores']}")
+
+if result.get("pii_found"):
+    print(f"  PII redacted : {result['pii_redaction_count']} items ({', '.join(result['pii_found'])})")
