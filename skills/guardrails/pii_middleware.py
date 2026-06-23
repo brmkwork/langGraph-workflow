@@ -10,15 +10,9 @@ PII_ENTITIES = [
     "EMAIL_ADDRESS",
     "PHONE_NUMBER",
     "CREDIT_CARD",
-    "US_SSN",
     "PERSON",
     "LOCATION",
     "IP_ADDRESS",
-    "IBAN_CODE",
-    "DATE_TIME",
-    "NRP",
-    "MEDICAL_LICENSE",
-    "URL",
 ]
 
 
