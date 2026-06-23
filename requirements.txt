@@ -13,3 +13,4 @@ jsonloader
 spacy 
 presidio-analyzer 
 presidio-anonymizer
+msoffcrypto-tool

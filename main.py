@@ -65,7 +65,7 @@ result = graph.invoke({
 
 print("\n" + "─" * 30)
 print(f"  Final response (score: {result['avg_score']}/10)")
-print(f"  Mode     : {result['command']}")
+print(f"  Tools used : {', '.join(result.get('tool_calls_made', [])) or 'none'}")
 print(f"  Attempts : {result['attempts']}")
 print("─" * 30)
 print(result["response"])
